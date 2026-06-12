@@ -48,6 +48,7 @@ const readComicInfoXML = async ({ entries, loadBlob }) => {
         series: get('Series'),
         seriesPosition: get('Number'),
         seriesTotal: get('Count'),
+        rtl: get('Manga')?.toLowerCase() === 'yesandrighttoleft' || undefined,
     }
 }
 
@@ -120,6 +121,7 @@ export const makeComicBook = async ({ entries, loadBlob, getSize, getComment }, 
         if (merged.seriesTotal) series.total = merged.seriesTotal
         book.metadata.belongsTo = { series }
     }
+    if (merged.rtl) book.dir = 'rtl'
     book.getCover = () => loadBlob(files[0])
     book.sections = files.map(name => ({
         id: name,
