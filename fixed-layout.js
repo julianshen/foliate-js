@@ -81,6 +81,17 @@ export const applyOverlayerViewBox = (frame, overlayer) => {
     }
 }
 
+// Whether a late `pageSpread: 'center'` hint for `section` invalidates the
+// current spread map (i.e. the section is paired into a left/right spread).
+export const sectionNeedsRespread = (spreads, section) => {
+    if (!spreads) return false
+    for (const { left, right, center } of spreads) {
+        if (center === section) return false
+        if (left === section || right === section) return true
+    }
+    return false
+}
+
 export class FixedLayout extends HTMLElement {
     static observedAttributes = ['zoom', 'scale-factor', 'spread', 'flow']
     #root = this.attachShadow({ mode: 'open' })
@@ -110,6 +121,7 @@ export class FixedLayout extends HTMLElement {
     #pageColors = {}
     #preloadQueue = []
     #activePreloads = 0
+    #spreadHintScheduled = false
     // Scroll mode fields
     #scrollMode = false
     #scrollPages = []
@@ -829,6 +841,7 @@ export class FixedLayout extends HTMLElement {
         this.book = book
         this.defaultViewport = book.rendition?.viewport
         this.rtl = book.dir === 'rtl'
+        book.onSectionSpreadHint = section => this.#onSectionSpreadHint(section)
 
         this.#spread()
         if (this.#scrollMode) this.#initScrollMode()
@@ -894,6 +907,20 @@ export class FixedLayout extends HTMLElement {
         this.#spreadAccessTime.clear()
         this.#overlayers.clear()
         this.goToSpread(index, this.rtl ? 'right' : 'left', 'page')
+    }
+    #onSectionSpreadHint(section) {
+        if (this.#scrollMode || this.spread === 'none') return
+        if (!sectionNeedsRespread(this.#spreads, section)) return
+        if (this.#spreadHintScheduled) return
+        this.#spreadHintScheduled = true
+        // Hints fire from section.load() while goToSpread/preload is mid-flight;
+        // a synchronous respread would race the in-flight #showSpread. Defer one
+        // tick so the current render settles, then rebuild re-anchored by section.
+        setTimeout(() => {
+            this.#spreadHintScheduled = false
+            if (this.#index === -1) return
+            this.#respread(this.spread)
+        }, 0)
     }
     get index() {
         if (this.#scrollMode) return this.#scrollCurrentIndex >= 0

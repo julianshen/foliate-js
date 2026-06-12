@@ -77,9 +77,35 @@ const readComicBookInfo = async ({ getComment }) => {
 export const makeComicBook = async ({ entries, loadBlob, getSize, getComment }, file) => {
     const cache = new Map()
     const urls = new Map()
+    const sectionsByName = new Map()
+    const probedSpreads = new Set()
+    // An image at least as wide as it is tall is a scanned double-page spread:
+    // mark it `center` so the spread assembly renders it alone. Dimensions are
+    // only knowable by decoding, so this runs lazily on first load and notifies
+    // the renderer through book.onSectionSpreadHint.
+    const probeSpread = async (name, blob) => {
+        if (probedSpreads.has(name)) return
+        probedSpreads.add(name)
+        if (typeof createImageBitmap !== 'function') return
+        const section = sectionsByName.get(name)
+        if (!section || section.pageSpread === 'center') return
+        try {
+            const bitmap = await createImageBitmap(blob)
+            const wide = bitmap.width >= bitmap.height
+            bitmap.close?.()
+            if (wide) {
+                section.pageSpread = 'center'
+                book.onSectionSpreadHint?.(section)
+            }
+        } catch {
+            // decode failure → treat as a normal single page
+        }
+    }
     const load = async name => {
         if (cache.has(name)) return cache.get(name)
-        const src = URL.createObjectURL(await loadBlob(name))
+        const blob = await loadBlob(name)
+        await probeSpread(name, blob)
+        const src = URL.createObjectURL(blob)
         const page = URL.createObjectURL(
             new Blob([`<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="margin: 0"><img src="${src}"></body></html>`], { type: 'text/html' }))
         urls.set(name, [src, page])
@@ -100,6 +126,8 @@ export const makeComicBook = async ({ entries, loadBlob, getSize, getComment }, 
     if (!files.length) throw new Error('No supported image files in archive')
 
     const book = {}
+    // Set by the renderer; called when a lazily probed section turns out wide.
+    book.onSectionSpreadHint = null
     // Prefer ComicInfo.xml (Anansi standard) over ComicBookInfo (JSON in zip comment).
     // Fields missing from the preferred source fall through to the secondary one.
     const xml = await readComicInfoXML({ entries, loadBlob })
@@ -123,12 +151,16 @@ export const makeComicBook = async ({ entries, loadBlob, getSize, getComment }, 
     }
     if (merged.rtl) book.dir = 'rtl'
     book.getCover = () => loadBlob(files[0])
-    book.sections = files.map(name => ({
-        id: name,
-        load: () => load(name),
-        unload: () => unload(name),
-        size: getSize(name),
-    }))
+    book.sections = files.map(name => {
+        const section = {
+            id: name,
+            load: () => load(name),
+            unload: () => unload(name),
+            size: getSize(name),
+        }
+        sectionsByName.set(name, section)
+        return section
+    })
     book.toc = files.map(name => ({ label: name, href: name }))
     book.rendition = { layout: 'pre-paginated' }
     book.resolveHref = href => ({ index: book.sections.findIndex(s => s.id === href) })
