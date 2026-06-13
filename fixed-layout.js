@@ -1103,6 +1103,12 @@ export class FixedLayout extends HTMLElement {
         for (const { index: targetIndex, direction } of toPreload) {
             const cacheKey = `spread-${targetIndex}`
             if (this.#prerenderedSpreads.has(cacheKey)) continue
+            // Skip spreads already loaded or in flight: #preloadCache holds
+            // 'loading' from dequeue until the frame lands in #prerenderedSpreads.
+            // Without this, rapid page turns (with preload-ahead/concurrency > 1)
+            // re-enqueue the same spread, starting a duplicate load whose frame
+            // orphans the first in the shadow DOM.
+            if (this.#preloadCache.has(cacheKey)) continue
             const spread = this.#spreads[targetIndex]
             if (!spread) continue
             this.#preloadQueue.push({ targetIndex, direction, spread, cacheKey })
@@ -1196,18 +1202,17 @@ export class FixedLayout extends HTMLElement {
         return (spread.center?.size ?? 0) + (spread.left?.size ?? 0) + (spread.right?.size ?? 0)
     }
     #cleanupPreloadCache() {
-        if (
-            this.#prerenderedSpreads.size <= this.#maxCachedSpreads &&
-            this.#maxCachedBytes === Infinity
-        ) {
-            return
-        }
-
         const entries = Array.from(this.#prerenderedSpreads.keys()).map(key => ({
             key,
             accessTime: this.#spreadAccessTime.get(key) || 0,
             bytes: this.#spreadByteSize(key),
         }))
+        // Within both caps: nothing to evict. (totalBytes <= Infinity always
+        // holds, so the default no-byte-cap path exits purely on the count.)
+        const totalBytes = entries.reduce((sum, e) => sum + e.bytes, 0)
+        if (entries.length <= this.#maxCachedSpreads && totalBytes <= this.#maxCachedBytes) {
+            return
+        }
 
         // Protect the current spread and its immediate neighbors so eviction can
         // never drop a frame we are about to (or just did) display.
