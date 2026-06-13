@@ -1048,6 +1048,14 @@ export class Paginator extends HTMLElement {
             overflow: auto;
             overflow-anchor: auto;
             flex-direction: column;
+            /* Composite the scroll container so its scrollbar repaints on the
+               compositor thread; the main-thread scrollbar fails to
+               re-invalidate after content-size changes (adjacent-section
+               preloading right after open), so on Windows' always-on
+               scrollbars it vanishes shortly after the book opens
+               (readest#4470). Scoped to scrolled mode to leave the paginated
+               page-turn path un-composited. */
+            transform: translateZ(0);
         }
         :host([flow="scrolled"]) #container.vertical {
             flex-direction: row;
@@ -1687,6 +1695,13 @@ export class Paginator extends HTMLElement {
     }
 
     scrollBy(dx, dy) {
+        // #scrollBounds is populated by #scrollToPage and stays unset until
+        // the first page settles. A swipe that lands before that happens
+        // (for example a fast swipe right after the reader mounts, or
+        // before a section has finished loading) would otherwise blow up
+        // on the destructuring below — bail out and let the next settled
+        // scroll re-enable swipe-driven motion.
+        if (!this.#scrollBounds) return
         const delta = this.#vertical ? dy : dx
         const [offset, a, b] = this.#scrollBounds
         const rtl = this.#rtl
@@ -1700,6 +1715,11 @@ export class Paginator extends HTMLElement {
     // dx, dy: total distance swiped
     // dt: total time of the swipe (ms)
     snap(vx, vy, dx, dy, dt) {
+        // Same guard as scrollBy: an early swipe whose touchend fires
+        // before the first #scrollToPage seeds #scrollBounds would crash
+        // on the destructuring. Skip the snap; the next settled scroll
+        // populates the bounds and subsequent swipes work normally.
+        if (!this.#scrollBounds) return
         const velocity = this.#vertical ? vy : vx
         const avgVelocity = this.#vertical ? dy / dt : dx / dt
         const horizontal = Math.abs(vx) * 2 > Math.abs(vy)
@@ -1820,10 +1840,24 @@ export class Paginator extends HTMLElement {
                     ({ left: size - right - marginTop, right: size - left - marginBottom })
                 : ({ top, bottom }) => ({ left: top - marginTop, right: bottom - marginBottom })
         }
-        const pxSize = this.#renderedPages * this.size
+        // For RTL the mapper mirrors a rect within the iframe-local
+        // coordinate space of the *target view* (each view is a separate
+        // document with its own column layout), not across the whole
+        // container. Using `#renderedPages * size` (= total width of all
+        // loaded views) was correct only when a single view was loaded;
+        // once #fillVisibleArea pre-loads adjacent sections the total
+        // width grows but the per-view rect coordinates do not change,
+        // so the mapper would scroll the same anchor to a different
+        // (further-right) container offset on every re-anchor — driving
+        // the page off the user's saved position. Use the supplied
+        // view's width when available, falling back to the primary view.
+        const targetView = view ?? this.#primaryView
+        const viewSize = targetView
+            ? targetView.element.getBoundingClientRect()[this.sideProp]
+            : this.#renderedViewSize
         return this.#rtl
             ? ({ left, right }) =>
-                ({ left: pxSize - right, right: pxSize - left })
+                ({ left: viewSize - right, right: viewSize - left })
             : this.#vertical
                 ? ({ top, bottom }) => ({ left: top, right: bottom })
                 : f => f
