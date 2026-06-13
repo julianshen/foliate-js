@@ -181,6 +181,7 @@ export class FixedLayout extends HTMLElement {
     #maxConcurrentPreloads = 1
     #numPrerenderedSpreads = 1
     #maxCachedSpreads = 2
+    #maxCachedBytes = Infinity
     #overlayers = new Map()
     #pageColors = {}
     #preloadQueue = []
@@ -1160,42 +1161,59 @@ export class FixedLayout extends HTMLElement {
             })
         }
     }
+    // Total image bytes for the cached spread at `cacheKey`, derived from the
+    // section `.size` fields (comic-book.js sets these). Returns 0 if the spread
+    // is gone (e.g. after a respread shifted indices); such stale keys are
+    // cleared separately, so undercounting them here is harmless.
+    #spreadByteSize(cacheKey) {
+        const index = Number.parseInt(cacheKey.slice('spread-'.length), 10)
+        const spread = this.#spreads?.[index]
+        if (!spread) return 0
+        return (spread.center?.size ?? 0) + (spread.left?.size ?? 0) + (spread.right?.size ?? 0)
+    }
     #cleanupPreloadCache() {
-        const maxSpreads = this.#maxCachedSpreads
-        if (this.#prerenderedSpreads.size <= maxSpreads) {
+        if (
+            this.#prerenderedSpreads.size <= this.#maxCachedSpreads &&
+            this.#maxCachedBytes === Infinity
+        ) {
             return
         }
 
-        const framesByAge = Array.from(this.#prerenderedSpreads.keys())
-            .map(key => ({
-                key,
-                accessTime: this.#spreadAccessTime.get(key) || 0,
-            }))
-            .sort((a, b) => a.accessTime - b.accessTime)
+        const entries = Array.from(this.#prerenderedSpreads.keys()).map(key => ({
+            key,
+            accessTime: this.#spreadAccessTime.get(key) || 0,
+            bytes: this.#spreadByteSize(key),
+        }))
 
-        const numToRemove = this.#prerenderedSpreads.size - maxSpreads
-        const framesToDelete = framesByAge.slice(0, numToRemove).map(item => item.key)
+        // Protect the current spread and its immediate neighbors so eviction can
+        // never drop a frame we are about to (or just did) display.
+        const protectedKeys = [this.#index - 1, this.#index, this.#index + 1]
+            .filter(i => i >= 0)
+            .map(i => `spread-${i}`)
 
-        if (framesToDelete.length > 0) {
-            framesToDelete.forEach(key => {
-                const frames = this.#prerenderedSpreads.get(key)
-                if (frames) {
-                    if (frames.center) {
-                        this.#removeOverlayerForFrame(frames.center)
-                        frames.center.element?.remove()
-                    } else {
-                        this.#removeOverlayerForFrame(frames.left)
-                        this.#removeOverlayerForFrame(frames.right)
-                        frames.left?.element?.remove()
-                        frames.right?.element?.remove()
-                    }
+        const framesToDelete = selectSpreadsToEvict(entries, {
+            maxSpreads: this.#maxCachedSpreads,
+            maxBytes: this.#maxCachedBytes,
+            protectedKeys,
+        })
+
+        framesToDelete.forEach(key => {
+            const frames = this.#prerenderedSpreads.get(key)
+            if (frames) {
+                if (frames.center) {
+                    this.#removeOverlayerForFrame(frames.center)
+                    frames.center.element?.remove()
+                } else {
+                    this.#removeOverlayerForFrame(frames.left)
+                    this.#removeOverlayerForFrame(frames.right)
+                    frames.left?.element?.remove()
+                    frames.right?.element?.remove()
                 }
-
-                this.#prerenderedSpreads.delete(key)
-                this.#spreadAccessTime.delete(key)
-                this.#preloadCache.delete(key)
-            })
-        }
+            }
+            this.#prerenderedSpreads.delete(key)
+            this.#spreadAccessTime.delete(key)
+            this.#preloadCache.delete(key)
+        })
     }
     #removeOverlayerForFrame(frame) {
         if (!frame?.iframe) return
