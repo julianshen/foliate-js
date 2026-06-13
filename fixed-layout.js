@@ -157,7 +157,8 @@ export const selectSpreadsToEvict = (entries, { maxSpreads, maxBytes, protectedK
 }
 
 export class FixedLayout extends HTMLElement {
-    static observedAttributes = ['zoom', 'scale-factor', 'spread', 'flow']
+    static observedAttributes = ['zoom', 'scale-factor', 'spread', 'flow',
+        'preload-ahead', 'preload-behind', 'cache-spreads', 'preload-concurrency', 'cache-bytes']
     #root = this.attachShadow({ mode: 'open' })
     #observer = new ResizeObserver(() => this.#render())
     #spreads
@@ -179,7 +180,8 @@ export class FixedLayout extends HTMLElement {
     #prerenderedSpreads = new Map()
     #spreadAccessTime = new Map()
     #maxConcurrentPreloads = 1
-    #numPrerenderedSpreads = 1
+    #preloadAhead = 1
+    #preloadBehind = 0
     #maxCachedSpreads = 2
     #maxCachedBytes = Infinity
     #overlayers = new Map()
@@ -302,6 +304,23 @@ export class FixedLayout extends HTMLElement {
                     this.#render()
                 }
                 break
+            case 'preload-ahead':
+                this.#preloadAhead = Math.max(0, Number.parseInt(value, 10) || 0)
+                break
+            case 'preload-behind':
+                this.#preloadBehind = Math.max(0, Number.parseInt(value, 10) || 0)
+                break
+            case 'cache-spreads':
+                this.#maxCachedSpreads = Math.max(1, Number.parseInt(value, 10) || 1)
+                break
+            case 'preload-concurrency':
+                this.#maxConcurrentPreloads = Math.max(1, Number.parseInt(value, 10) || 1)
+                break
+            case 'cache-bytes': {
+                const bytes = Number.parseInt(value, 10)
+                this.#maxCachedBytes = Number.isFinite(bytes) && bytes > 0 ? bytes : Infinity
+                break
+            }
         }
     }
     async #createFrame({ index, src: srcOption, detached = false }) {
@@ -1059,11 +1078,11 @@ export class FixedLayout extends HTMLElement {
     #preloadNextSpreads() {
         this.#cleanupPreloadCache()
 
-        if (this.#numPrerenderedSpreads <= 0) return
+        if (this.#preloadAhead <= 0 && this.#preloadBehind <= 0) return
 
         const toPreload = []
-        const forwardPreloadCount = Math.max(1, this.#numPrerenderedSpreads - 1)
-        const backwardPreloadCount = Math.max(0, this.#numPrerenderedSpreads - forwardPreloadCount)
+        const forwardPreloadCount = this.#preloadAhead
+        const backwardPreloadCount = this.#preloadBehind
         for (let distance = 1; distance <= forwardPreloadCount; distance++) {
             const forwardIndex = this.#index + distance
             if (forwardIndex >= 0 && forwardIndex < this.#spreads.length) {
