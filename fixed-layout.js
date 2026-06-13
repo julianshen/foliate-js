@@ -81,6 +81,46 @@ export const applyOverlayerViewBox = (frame, overlayer) => {
     }
 }
 
+// Builds the spread map: pairs sections into {left, right} records, honoring
+// per-section pageSpread overrides ('center' renders alone; 'left'/'right'
+// force a side). Pure so spread assembly is testable without a renderer.
+export const assembleSpreads = (sections, rtl, spread) => {
+    if (spread === 'none') return sections.map(section => ({ center: section }))
+    const ltr = !rtl
+    return sections.reduce((arr, section, i) => {
+        const last = arr[arr.length - 1]
+        const { pageSpread } = section
+        const newSpread = () => {
+            const spread = {}
+            arr.push(spread)
+            return spread
+        }
+        if (pageSpread === 'center') {
+            const spread = last.left || last.right || last.center ? newSpread() : last
+            spread.center = section
+        }
+        else if (pageSpread === 'left') {
+            const spread = last.center || last.left || ltr && i ? newSpread() : last
+            spread.left = section
+        }
+        else if (pageSpread === 'right') {
+            const spread = last.center || last.right || rtl && i ? newSpread() : last
+            spread.right = section
+        }
+        else if (ltr) {
+            if (last.center || last.right) newSpread().left = section
+            else if (last.left || !i) last.right = section
+            else last.left = section
+        }
+        else {
+            if (last.center || last.left) newSpread().right = section
+            else if (last.right || !i) last.left = section
+            else last.right = section
+        }
+        return arr
+    }, [{}])
+}
+
 // Whether a late `pageSpread: 'center'` hint for `section` invalidates the
 // current spread map (i.e. the section is paired into a left/right spread).
 export const sectionNeedsRespread = (spreads, section) => {
@@ -121,7 +161,8 @@ export class FixedLayout extends HTMLElement {
     #pageColors = {}
     #preloadQueue = []
     #activePreloads = 0
-    #spreadHintScheduled = false
+    #spreadGeneration = 0
+    #spreadHintTimer = null
     // Scroll mode fields
     #scrollMode = false
     #scrollPages = []
@@ -222,6 +263,15 @@ export class FixedLayout extends HTMLElement {
                     this.#scrollMode = true
                     if (this.book) this.#initScrollMode(savedIndex)
                 } else if (value !== 'scrolled' && this.#scrollMode) {
+                    // Wide-page hints discovered while scrolled set pageSpread
+                    // but can't respread (the map is paginated-only); rebuild a
+                    // stale map before #destroyScrollMode navigates back to the
+                    // current section, which re-anchors against the fresh map.
+                    if (this.book?.sections.some(s => sectionNeedsRespread(this.#spreads, s))) {
+                        this.#spread(this.spread)
+                        this.#clearSpreadCaches()
+                        this.#index = -1
+                    }
                     this.#destroyScrollMode()
                     this.#scrollMode = false
                     this.#render()
@@ -847,53 +897,12 @@ export class FixedLayout extends HTMLElement {
         if (this.#scrollMode) this.#initScrollMode()
     }
     #spread(mode) {
-        const book = this.book
-        const { rendition } = book
-        const rtl = this.rtl
-        const ltr = !rtl
-        this.spread = mode || rendition?.spread
-
-        if (this.spread === 'none')
-            this.#spreads = book.sections.map(section => ({ center: section }))
-        else this.#spreads = book.sections.reduce((arr, section, i) => {
-            const last = arr[arr.length - 1]
-            const { pageSpread } = section
-            const newSpread = () => {
-                const spread = {}
-                arr.push(spread)
-                return spread
-            }
-            if (pageSpread === 'center') {
-                const spread = last.left || last.right ? newSpread() : last
-                spread.center = section
-            }
-            else if (pageSpread === 'left') {
-                const spread = last.center || last.left || ltr && i ? newSpread() : last
-                spread.left = section
-            }
-            else if (pageSpread === 'right') {
-                const spread = last.center || last.right || rtl && i ? newSpread() : last
-                spread.right = section
-            }
-            else if (ltr) {
-                if (last.center || last.right) newSpread().left = section
-                else if (last.left || !i) last.right = section
-                else last.left = section
-            }
-            else {
-                if (last.center || last.left) newSpread().right = section
-                else if (last.right || !i) last.left = section
-                else last.right = section
-            }
-            return arr
-        }, [{}])
+        this.spread = mode || this.book.rendition?.spread
+        this.#spreadGeneration++
+        this.#spreads = assembleSpreads(this.book.sections, this.rtl, this.spread)
     }
-    #respread(spreadMode) {
-        if (this.#index === -1) return
-        const section = this.book.sections[this.index]
-        this.#spread(spreadMode)
-        const { index } = this.getSpreadOf(section)
-        this.#index = -1
+    #clearSpreadCaches() {
+        this.#preloadQueue.length = 0
         this.#preloadCache.clear()
         for (const frames of this.#prerenderedSpreads.values()) {
             if (frames.center) {
@@ -906,18 +915,25 @@ export class FixedLayout extends HTMLElement {
         this.#prerenderedSpreads.clear()
         this.#spreadAccessTime.clear()
         this.#overlayers.clear()
+    }
+    #respread(spreadMode) {
+        if (this.#index === -1) return
+        const section = this.book.sections[this.index]
+        this.#spread(spreadMode)
+        const index = this.getSpreadOf(section)?.index ?? 0
+        this.#index = -1
+        this.#clearSpreadCaches()
         this.goToSpread(index, this.rtl ? 'right' : 'left', 'page')
     }
     #onSectionSpreadHint(section) {
         if (this.#scrollMode || this.spread === 'none') return
         if (!sectionNeedsRespread(this.#spreads, section)) return
-        if (this.#spreadHintScheduled) return
-        this.#spreadHintScheduled = true
+        if (this.#spreadHintTimer) return
         // Hints fire from section.load() while goToSpread/preload is mid-flight;
         // a synchronous respread would race the in-flight #showSpread. Defer one
         // tick so the current render settles, then rebuild re-anchored by section.
-        setTimeout(() => {
-            this.#spreadHintScheduled = false
+        this.#spreadHintTimer = setTimeout(() => {
+            this.#spreadHintTimer = null
             if (this.#index === -1) return
             this.#respread(this.spread)
         }, 0)
@@ -1054,14 +1070,29 @@ export class FixedLayout extends HTMLElement {
             const { spread, cacheKey } = task
             this.#preloadCache.set(cacheKey, 'loading')
             this.#activePreloads++
+            // A respread shifts spread indices, so completions from before the
+            // rebuild must not write under index-keyed cache keys. Capture the
+            // generation now and bail (cleaning up) if it moved while awaiting.
+            const generation = this.#spreadGeneration
             Promise.resolve().then(async () => {
+                const frames = []
+                const stale = () => {
+                    if (generation === this.#spreadGeneration) return false
+                    if (this.#preloadCache.get(cacheKey) === 'loading')
+                        this.#preloadCache.delete(cacheKey)
+                    for (const frame of frames) frame.element?.remove()
+                    return true
+                }
                 try {
                     if (spread.center) {
                         const src = await spread.center?.load?.()
+                        if (stale()) return
                         this.#preloadCache.set(cacheKey, { center: src })
 
                         const sectionIndex = this.book.sections.indexOf(spread.center)
                         const frame = await this.#createFrame({ index: sectionIndex, src, detached: true })
+                        frames.push(frame)
+                        if (stale()) return
 
                         this.#prerenderedSpreads.set(cacheKey, { center: frame })
                         this.#spreadAccessTime.set(cacheKey, Date.now())
@@ -1072,12 +1103,16 @@ export class FixedLayout extends HTMLElement {
                     } else {
                         const srcL = await spread.left?.load?.()
                         const srcR = await spread.right?.load?.()
+                        if (stale()) return
                         this.#preloadCache.set(cacheKey, { left: srcL, right: srcR })
 
                         const indexL = this.book.sections.indexOf(spread.left)
                         const indexR = this.book.sections.indexOf(spread.right)
                         const leftFrame = await this.#createFrame({ index: indexL, src: srcL, detached: true })
+                        frames.push(leftFrame)
                         const rightFrame = await this.#createFrame({ index: indexR, src: srcR, detached: true })
+                        frames.push(rightFrame)
+                        if (stale()) return
 
                         this.#prerenderedSpreads.set(cacheKey, { left: leftFrame, right: rightFrame })
                         this.#spreadAccessTime.set(cacheKey, Date.now())
@@ -1314,6 +1349,10 @@ export class FixedLayout extends HTMLElement {
     }
     destroy() {
         this.#observer.unobserve(this)
+        if (this.#spreadHintTimer) {
+            clearTimeout(this.#spreadHintTimer)
+            this.#spreadHintTimer = null
+        }
         if (this.#scrollMode) {
             this.removeEventListener('scroll', this.#handleScrollEvent)
             if (this.#scrollObserver) {
