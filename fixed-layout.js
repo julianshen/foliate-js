@@ -132,6 +132,30 @@ export const sectionNeedsRespread = (spreads, section) => {
     return false
 }
 
+// Pure LRU+byte eviction selector for the prerendered-spread cache. Given the
+// current cache entries ({ key, accessTime, bytes }) and the caps, returns the
+// keys to evict: oldest-accessed first, skipping protected keys (the current
+// spread and its immediate neighbors), stopping as soon as BOTH the count cap
+// and the byte cap are satisfied (or only protected keys remain).
+export const selectSpreadsToEvict = (entries, { maxSpreads, maxBytes, protectedKeys = [] }) => {
+    const protectedSet = new Set(protectedKeys)
+    let totalCount = entries.length
+    let totalBytes = entries.reduce((sum, e) => sum + (e.bytes || 0), 0)
+    const candidates = entries
+        .filter(e => !protectedSet.has(e.key))
+        .sort((a, b) => a.accessTime - b.accessTime)
+    const evict = []
+    const withinCaps = () =>
+        totalCount <= maxSpreads && (maxBytes == null || totalBytes <= maxBytes)
+    for (const candidate of candidates) {
+        if (withinCaps()) break
+        evict.push(candidate.key)
+        totalCount--
+        totalBytes -= candidate.bytes || 0
+    }
+    return evict
+}
+
 export class FixedLayout extends HTMLElement {
     static observedAttributes = ['zoom', 'scale-factor', 'spread', 'flow']
     #root = this.attachShadow({ mode: 'open' })
