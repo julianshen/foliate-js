@@ -163,7 +163,8 @@ export const selectSpreadsToEvict = (entries, { maxSpreads, maxBytes, protectedK
 
 export class FixedLayout extends HTMLElement {
     static observedAttributes = ['zoom', 'scale-factor', 'spread', 'flow',
-        'preload-ahead', 'preload-behind', 'cache-spreads', 'preload-concurrency', 'cache-bytes']
+        'preload-ahead', 'preload-behind', 'cache-spreads', 'preload-concurrency', 'cache-bytes',
+        'page-gap', 'scroll-lookahead']
     #root = this.attachShadow({ mode: 'open' })
     #observer = new ResizeObserver(() => this.#render())
     #spreads
@@ -202,6 +203,7 @@ export class FixedLayout extends HTMLElement {
     #scrollContainer = null
     #scrollLoadGen = new Map()
     #scrollMaxLoaded = 8
+    #scrollLookahead = '50%'
     #scrollIdleTimer = null
     #scrollCurrentIndex = -1
     #getScrollModePageMetrics() {
@@ -266,7 +268,7 @@ export class FixedLayout extends HTMLElement {
             position: relative;
             flex-shrink: 0;
             overflow: hidden;
-            margin: 4px 0;
+            margin: var(--page-gap, 4px) 0;
         }
         :host([flow="scrolled"]) .scroll-page iframe {
             pointer-events: none;
@@ -326,6 +328,14 @@ export class FixedLayout extends HTMLElement {
                 this.#maxCachedBytes = Number.isFinite(bytes) && bytes > 0 ? bytes : Infinity
                 break
             }
+            case 'page-gap':
+                this.style.setProperty('--page-gap', `${Math.max(0, Number.parseInt(value, 10) || 0)}px`)
+                break
+            case 'scroll-lookahead':
+                this.#scrollLookahead = value || '50%'
+                // Rebuild the observer live if we are already scrolling.
+                if (this.#scrollMode && this.#scrollPages.length) this.#setupScrollObserver()
+                break
         }
     }
     async #createFrame({ index, src: srcOption, detached = false }) {
@@ -620,8 +630,13 @@ export class FixedLayout extends HTMLElement {
 
         this.addEventListener('scroll', this.#handleScrollEvent)
 
-        // Set up IntersectionObserver after scroll position is established.
-        // rootMargin '50%' loads ~1 page buffer above/below the viewport.
+        // Set up IntersectionObserver after scroll position is established
+        // so only pages near the target are observed as intersecting. rootMargin
+        // (#scrollLookahead) controls how far ahead/behind pages preload.
+        this.#setupScrollObserver()
+    }
+    #setupScrollObserver() {
+        this.#scrollObserver?.disconnect()
         this.#scrollObserver = new IntersectionObserver(entries => {
             for (const entry of entries) {
                 if (!entry.isIntersecting) continue
@@ -632,8 +647,7 @@ export class FixedLayout extends HTMLElement {
                 }
             }
             this.#evictScrollPages()
-        }, { root: this, rootMargin: '50% 0px' })
-
+        }, { root: this, rootMargin: `${this.#scrollLookahead} 0px` })
         for (const page of this.#scrollPages) {
             this.#scrollObserver.observe(page.el)
         }
