@@ -155,6 +155,9 @@ export const makeComicBook = async ({ entries, loadBlob, getSize, getComment }, 
         const section = {
             id: name,
             load: () => load(name),
+            // Raw image Blob for the page (for thumbnails); `load()` returns an
+            // HTML-wrapper blob URL instead, which can't be drawn to a canvas.
+            loadImage: () => loadBlob(name),
             unload: () => unload(name),
             size: getSize(name),
         }
