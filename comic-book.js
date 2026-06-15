@@ -112,7 +112,7 @@ export const makeComicBook = async ({ entries, loadBlob, getSize, getComment }, 
         probeSpread(name, blob).catch(() => {})
         const src = URL.createObjectURL(blob)
         const page = URL.createObjectURL(
-            new Blob([`<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="margin: 0"><img src="${src}"></body></html>`], { type: 'text/html' }))
+            new Blob([`<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="margin: 0"><img decoding="async" src="${src}"></body></html>`], { type: 'text/html' }))
         urls.set(name, [src, page])
         cache.set(name, page)
         return page
