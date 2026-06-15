@@ -161,6 +161,25 @@ export const selectSpreadsToEvict = (entries, { maxSpreads, maxBytes, protectedK
     return evict
 }
 
+// Pure selector for scroll-mode page eviction: given the currently loaded
+// pages ({ index }), the current page index, and the max kept, return the pages
+// to evict — the farthest from the current index, keeping the nearest `maxLoaded`.
+// Extracted so the distance policy is testable without a renderer.
+/**
+ * @template {{ index: number }} T
+ * @param {T[]} loaded
+ * @param {number} currentIndex
+ * @param {number} maxLoaded
+ * @returns {T[]}
+ */
+export const selectScrollPagesToEvict = (loaded, currentIndex, maxLoaded) => {
+    if (loaded.length <= maxLoaded) return []
+    return [...loaded]
+        .sort((a, b) =>
+            Math.abs(a.index - currentIndex) - Math.abs(b.index - currentIndex))
+        .slice(maxLoaded)
+}
+
 export class FixedLayout extends HTMLElement {
     static observedAttributes = ['zoom', 'scale-factor', 'spread', 'flow',
         'preload-ahead', 'preload-behind', 'cache-spreads', 'preload-concurrency', 'cache-bytes',
@@ -206,6 +225,7 @@ export class FixedLayout extends HTMLElement {
     #scrollLookahead = '50%'
     #scrollIdleTimer = null
     #scrollCurrentIndex = -1
+    #scrollEvictRaf = null
     #getScrollModePageMetrics() {
         return this.#scrollPages.map(page => ({
             index: page.index,
@@ -646,7 +666,7 @@ export class FixedLayout extends HTMLElement {
                     this.#loadScrollPage(pageData)
                 }
             }
-            this.#evictScrollPages()
+            this.#scheduleScrollEviction()
         }, { root: this, rootMargin: `${this.#scrollLookahead} 0px` })
         for (const page of this.#scrollPages) {
             this.#scrollObserver.observe(page.el)
@@ -685,6 +705,10 @@ export class FixedLayout extends HTMLElement {
         if (this.#scrollIdleTimer) {
             clearTimeout(this.#scrollIdleTimer)
             this.#scrollIdleTimer = null
+        }
+        if (this.#scrollEvictRaf != null) {
+            cancelAnimationFrame(this.#scrollEvictRaf)
+            this.#scrollEvictRaf = null
         }
         // Clean up all scroll page frames and overlayers
         for (const page of this.#scrollPages) {
@@ -840,14 +864,27 @@ export class FixedLayout extends HTMLElement {
         pageData.frame = null
         pageData.state = 'idle'
     }
+    // Coalesce eviction into a single rAF. Running it inside the
+    // IntersectionObserver callback (right after #loadScrollPage appends frames)
+    // forces a synchronous reflow when #getScrollIndex reads every page's rect.
+    // Deferring to the next frame lets layout settle first and batches the many
+    // observer callbacks fired during a fling into one eviction pass.
+    #scheduleScrollEviction() {
+        if (this.#scrollEvictRaf != null) return
+        this.#scrollEvictRaf = requestAnimationFrame(() => {
+            this.#scrollEvictRaf = null
+            this.#evictScrollPages()
+        })
+    }
     // Evict the farthest loaded pages when over limit
     #evictScrollPages() {
         const loaded = this.#scrollPages.filter(p => p.state === 'loaded')
         if (loaded.length <= this.#scrollMaxLoaded) return
-        const currentIndex = this.#getScrollIndex()
-        loaded.sort((a, b) =>
-            Math.abs(a.index - currentIndex) - Math.abs(b.index - currentIndex))
-        for (const page of loaded.slice(this.#scrollMaxLoaded)) {
+        // Prefer the cached index (kept fresh on scroll-settle) to avoid a
+        // getBoundingClientRect sweep; fall back to a measured index if unset.
+        const currentIndex = this.#scrollCurrentIndex >= 0
+            ? this.#scrollCurrentIndex : this.#getScrollIndex()
+        for (const page of selectScrollPagesToEvict(loaded, currentIndex, this.#scrollMaxLoaded)) {
             this.#teardownScrollPage(page)
         }
     }
