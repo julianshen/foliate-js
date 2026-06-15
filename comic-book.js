@@ -104,7 +104,12 @@ export const makeComicBook = async ({ entries, loadBlob, getSize, getComment }, 
     const load = async name => {
         if (cache.has(name)) return cache.get(name)
         const blob = await loadBlob(name)
-        await probeSpread(name, blob)
+        // Fire-and-forget: the spread probe decodes the full-resolution image
+        // only to detect wide double-page scans, and the renderer ignores that
+        // hint in scroll/webtoon mode (and when spread === 'none'). Awaiting it
+        // would block page appearance behind a decode for no benefit there; the
+        // late hint still arrives asynchronously for paginated respread.
+        probeSpread(name, blob).catch(() => {})
         const src = URL.createObjectURL(blob)
         const page = URL.createObjectURL(
             new Blob([`<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="margin: 0"><img src="${src}"></body></html>`], { type: 'text/html' }))
