@@ -183,7 +183,7 @@ export const selectScrollPagesToEvict = (loaded, currentIndex, maxLoaded) => {
 export class FixedLayout extends HTMLElement {
     static observedAttributes = ['zoom', 'scale-factor', 'spread', 'flow',
         'preload-ahead', 'preload-behind', 'cache-spreads', 'preload-concurrency', 'cache-bytes',
-        'page-gap', 'scroll-lookahead']
+        'page-gap', 'scroll-lookahead', 'scroll-max-loaded']
     #root = this.attachShadow({ mode: 'open' })
     #observer = new ResizeObserver(() => this.#render())
     #spreads
@@ -355,6 +355,11 @@ export class FixedLayout extends HTMLElement {
                 this.#scrollLookahead = value || '50%'
                 // Rebuild the observer live if we are already scrolling.
                 if (this.#scrollMode && this.#scrollPages.length) this.#setupScrollObserver()
+                break
+            case 'scroll-max-loaded':
+                this.#scrollMaxLoaded = Math.max(1, Number.parseInt(value, 10) || 1)
+                // Trim immediately if the new cap is lower than what's loaded.
+                if (this.#scrollMode && this.#scrollPages.length) this.#scheduleScrollEviction()
                 break
         }
     }
